@@ -1,6 +1,6 @@
 import { protectedProcedure } from '@/server/api/trpc';
 import { trackEvent } from '@/utils/analytics/server';
-import { CodeProvider, getStaticCodeProvider } from '@onlook/code-provider';
+import { getStaticCodeProvider } from '@onlook/code-provider';
 import { getSandboxPreviewUrl, Tags } from '@onlook/constants';
 import {
     branches,
@@ -22,7 +22,7 @@ import { ProjectRole } from '@onlook/models';
 import { eq } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { z } from 'zod';
-import { verifyProjectAccess } from './helper';
+import { providerForForkSource, verifyProjectAccess } from './helper';
 
 type ForkedBranch = {
     newBranch: Branch;
@@ -57,7 +57,6 @@ async function forkAllBranches(
     sourceBranches: Branch[],
     sourceProjectName: string
 ): Promise<Map<string, ForkedBranch>> {
-    const CodesandboxProvider = await getStaticCodeProvider(CodeProvider.CodeSandbox);
     const branchMapping = new Map<string, ForkedBranch>();
 
     for (const sourceBranch of sourceBranches) {
@@ -65,7 +64,10 @@ async function forkAllBranches(
             throw new Error(`Branch ${sourceBranch.name} has no sandbox ID`);
         }
 
-        const newSandbox = await CodesandboxProvider.createProject({
+        const SandboxProvider = await getStaticCodeProvider(
+            providerForForkSource(sourceBranch.sandboxId),
+        );
+        const newSandbox = await SandboxProvider.createProject({
             source: 'template',
             id: sourceBranch.sandboxId,
             title: `${sourceProjectName} (Fork) - ${sourceBranch.name}`,

@@ -4,6 +4,7 @@ import { trackEvent } from '@/utils/analytics/server';
 import { TRPCError } from '@trpc/server';
 import FirecrawlApp from '@mendable/firecrawl-js';
 import { initModel } from '@onlook/ai';
+import { isDockerSandboxId } from '@onlook/code-provider';
 import { getSandboxPreviewUrl, STORAGE_BUCKETS } from '@onlook/constants';
 import {
     branches,
@@ -78,6 +79,11 @@ export const projectRouter = createTRPCRouter({
 
                 if (!branch.sandboxId) {
                     throw new Error('No sandbox found for branch');
+                }
+
+                // Self-hosted runner previews are tailnet-only; Firecrawl cannot reach them.
+                if (isDockerSandboxId(branch.sandboxId)) {
+                    return { success: false, error: 'Screenshots are not available for self-hosted sandboxes' };
                 }
 
                 // Extract port from existing frame URL or fall back to 3000

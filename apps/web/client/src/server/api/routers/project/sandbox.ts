@@ -4,13 +4,24 @@ import { z } from 'zod';
 import {
     CodeProvider,
     createCodeProviderClient,
+    defaultCodeProvider,
+    DockerProvider,
     getStaticCodeProvider,
+    mintSandboxToken,
+    providerForSandboxId,
 } from '@onlook/code-provider';
 import { getSandboxPreviewUrl, SandboxTemplates, Templates } from '@onlook/constants';
 import { shortenUuid } from '@onlook/utility/src/id';
 
 import { createTRPCRouter, protectedProcedure } from '../../trpc';
-import { listAccessibleSandboxIds, verifySandboxAccess } from './helper';
+import { env } from '@/env';
+import { listAccessibleSandboxIds, providerForForkSource, verifySandboxAccess } from './helper';
+
+const NOT_AVAILABLE_GITHUB = 'GitHub import is not available on the self-hosted runner';
+
+function isDocker(sandboxId: string) {
+    return providerForSandboxId(sandboxId) === CodeProvider.Docker;
+}
 
 function getProvider({
     sandboxId,
@@ -48,12 +59,12 @@ export const sandboxRouter = createTRPCRouter({
         )
         .mutation(async ({ input }) => {
             // Create a new sandbox using the static provider
-            const CodesandboxProvider = await getStaticCodeProvider(CodeProvider.CodeSandbox);
+            const SandboxProvider = await getStaticCodeProvider(defaultCodeProvider());
 
             // Use the empty Next.js template
             const template = SandboxTemplates[Templates.EMPTY_NEXTJS];
 
-            const newSandbox = await CodesandboxProvider.createProject({
+            const newSandbox = await SandboxProvider.createProject({
                 source: 'template',
                 id: template.id,
                 title: input.title || 'Onlook Test Sandbox',
@@ -76,6 +87,26 @@ export const sandboxRouter = createTRPCRouter({
         .mutation(async ({ input, ctx }) => {
             const userId = ctx.user.id;
             await verifySandboxAccess(ctx.db, userId, input.sandboxId);
+            if (isDocker(input.sandboxId)) {
+                if (!env.NEXT_PUBLIC_RUNNER_URL) {
+                    throw new TRPCError({
+                        code: 'INTERNAL_SERVER_ERROR',
+                        message: 'NEXT_PUBLIC_RUNNER_URL is not configured',
+                    });
+                }
+                try {
+                    // Make sure the container is up before the browser connects.
+                    await DockerProvider.startSandbox(input.sandboxId);
+                    const token = await mintSandboxToken(input.sandboxId, userId);
+                    return { token, runnerUrl: env.NEXT_PUBLIC_RUNNER_URL };
+                } catch (error) {
+                    throw new TRPCError({
+                        code: 'INTERNAL_SERVER_ERROR',
+                        message: `Failed to start sandbox: ${error instanceof Error ? error.message : String(error)}`,
+                        cause: error,
+                    });
+                }
+            }
             const provider = await getProvider({
                 sandboxId: input.sandboxId,
                 userId,
@@ -96,6 +127,10 @@ export const sandboxRouter = createTRPCRouter({
         )
         .mutation(async ({ input, ctx }) => {
             await verifySandboxAccess(ctx.db, ctx.user.id, input.sandboxId);
+            if (isDocker(input.sandboxId)) {
+                await DockerProvider.stopSandbox(input.sandboxId);
+                return;
+            }
             const provider = await getProvider({ sandboxId: input.sandboxId });
             try {
                 await provider.pauseProject({});
@@ -105,6 +140,9 @@ export const sandboxRouter = createTRPCRouter({
         }),
     list: protectedProcedure.input(z.object({ sandboxId: z.string() })).query(async ({ input, ctx }) => {
         await verifySandboxAccess(ctx.db, ctx.user.id, input.sandboxId);
+        if (isDocker(input.sandboxId)) {
+            return [];
+        }
         const provider = await getProvider({ sandboxId: input.sandboxId });
         const res = await provider.listProjects({});
         // TODO future iteration of code provider abstraction will need this code to be refactored
@@ -143,10 +181,10 @@ export const sandboxRouter = createTRPCRouter({
 
             for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
                 try {
-                    const CodesandboxProvider = await getStaticCodeProvider(
-                        CodeProvider.CodeSandbox,
+                    const SandboxProvider = await getStaticCodeProvider(
+                        providerForForkSource(input.sandbox.id),
                     );
-                    const sandbox = await CodesandboxProvider.createProject({
+                    const sandbox = await SandboxProvider.createProject({
                         source: 'template',
                         id: input.sandbox.id,
 
@@ -186,6 +224,10 @@ export const sandboxRouter = createTRPCRouter({
         )
         .mutation(async ({ input, ctx }) => {
             await verifySandboxAccess(ctx.db, ctx.user.id, input.sandboxId);
+            if (isDocker(input.sandboxId)) {
+                await DockerProvider.deleteSandbox(input.sandboxId);
+                return;
+            }
             const provider = await getProvider({ sandboxId: input.sandboxId });
             try {
                 await provider.stopProject({});
@@ -201,6 +243,12 @@ export const sandboxRouter = createTRPCRouter({
             }),
         )
         .mutation(async ({ input }) => {
+            if (defaultCodeProvider() === CodeProvider.Docker) {
+                throw new TRPCError({
+                    code: 'NOT_IMPLEMENTED',
+                    message: NOT_AVAILABLE_GITHUB,
+                });
+            }
             const MAX_RETRY_ATTEMPTS = 3;
             const DEFAULT_PORT = 3000;
             let lastError: Error | null = null;

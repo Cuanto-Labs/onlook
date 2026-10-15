@@ -8,7 +8,11 @@ export const env = createEnv({
      */
     server: {
         NODE_ENV: z.enum(['development', 'test', 'production']),
-        CSB_API_KEY: z.string(),
+        CSB_API_KEY: z.string().optional(),
+
+        // Self-hosted Docker runner (see deploy/cuanto/runner/API.md)
+        RUNNER_SECRET: z.string().optional(),
+        RUNNER_INTERNAL_URL: z.url().optional(),
         PASSWORD_LOGIN_ENABLED: z.string().optional(),
         SUPABASE_DATABASE_URL: z.url(),
         SUPABASE_SERVICE_ROLE_KEY: z.string(),
@@ -78,6 +82,11 @@ export const env = createEnv({
         NEXT_PUBLIC_HOSTING_DOMAIN: z.string().optional(),
         NEXT_PUBLIC_RB2B_ID: z.string().optional(),
         NEXT_PUBLIC_PASSWORD_LOGIN: z.string().optional(),
+
+        // Sandbox backend: 'docker' (self-hosted runner) or 'code_sandbox' (default)
+        NEXT_PUBLIC_CODE_PROVIDER: z.enum(['code_sandbox', 'docker']).optional(),
+        NEXT_PUBLIC_RUNNER_URL: z.string().optional(),
+        NEXT_PUBLIC_SANDBOX_PREVIEW_HOST: z.string().optional(),
     },
 
     /**
@@ -87,6 +96,11 @@ export const env = createEnv({
     runtimeEnv: {
         NODE_ENV: process.env.NODE_ENV,
         CSB_API_KEY: process.env.CSB_API_KEY,
+        RUNNER_SECRET: process.env.RUNNER_SECRET,
+        RUNNER_INTERNAL_URL: process.env.RUNNER_INTERNAL_URL,
+        NEXT_PUBLIC_CODE_PROVIDER: process.env.NEXT_PUBLIC_CODE_PROVIDER,
+        NEXT_PUBLIC_RUNNER_URL: process.env.NEXT_PUBLIC_RUNNER_URL,
+        NEXT_PUBLIC_SANDBOX_PREVIEW_HOST: process.env.NEXT_PUBLIC_SANDBOX_PREVIEW_HOST,
         PASSWORD_LOGIN_ENABLED: process.env.PASSWORD_LOGIN_ENABLED,
         NEXT_PUBLIC_PASSWORD_LOGIN: process.env.NEXT_PUBLIC_PASSWORD_LOGIN,
         RESEND_API_KEY: process.env.RESEND_API_KEY,

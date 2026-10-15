@@ -5,7 +5,6 @@ import type { ReactNode } from 'react';
 import { createContext, useContext, useState } from 'react';
 
 import type { Provider } from '@onlook/code-provider';
-import { CodeProvider, createCodeProviderClient } from '@onlook/code-provider';
 import { NEXT_JS_FILE_EXTENSIONS, SandboxTemplates, Templates } from '@onlook/constants';
 import { RouterType } from '@onlook/models';
 import { isTargetFile } from '@onlook/utility';
@@ -13,6 +12,7 @@ import { isTargetFile } from '@onlook/utility';
 import type { NextJsProjectValidation, ProcessedFile } from '@/app/projects/types';
 import { ProcessedFileType } from '@/app/projects/types';
 import { api } from '@/trpc/react';
+import { connectSandboxProvider } from '@/utils/sandbox/connect';
 import { Routes } from '@/utils/constants';
 
 export interface Project {
@@ -135,18 +135,11 @@ export const ProjectCreationProvider = ({ children, totalSteps }: ProjectCreatio
                 },
             });
 
-            const provider = await createCodeProviderClient(CodeProvider.CodeSandbox, {
-                providerOptions: {
-                    codesandbox: {
-                        sandboxId: forkedSandbox.sandboxId,
-                        userId: user.id,
-                        initClient: true,
-                        keepActiveWhileConnected: false,
-                        getSession: async (sandboxId) => {
-                            return startSandbox({ sandboxId });
-                        },
-                    },
-                },
+            const provider = await connectSandboxProvider({
+                sandboxId: forkedSandbox.sandboxId,
+                userId: user.id,
+                keepActiveWhileConnected: false,
+                startSession: (sandboxId) => startSandbox({ sandboxId }),
             });
 
             await uploadToSandbox(projectData.files, provider);

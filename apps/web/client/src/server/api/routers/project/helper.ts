@@ -1,5 +1,11 @@
 import { eq, inArray } from "drizzle-orm";
 import {
+    CodeProvider,
+    defaultCodeProvider,
+    providerForSandboxId,
+} from "@onlook/code-provider";
+import { SandboxTemplates } from "@onlook/constants";
+import {
     branches,
     canvases,
     conversations,
@@ -30,9 +36,28 @@ export function extractCsbPort(frames: Frame[]): number | null {
                     return port;
                 }
             }
+            // Self-hosted runner preview URL pattern: https://host:port
+            const dockerMatch = frame.url.match(/^https:\/\/[^/:]+:(\d+)/);
+            if (dockerMatch && dockerMatch[1]) {
+                const port = parseInt(dockerMatch[1], 10);
+                if (!isNaN(port)) {
+                    return port;
+                }
+            }
         }
     }
     return null;
+}
+
+/**
+ * Provider for forking from `sourceId`. Blank-template ids are CSB ids that every provider maps to its
+ * own blank template, so they follow the default provider; real sandbox ids keep their own provider.
+ */
+export function providerForForkSource(sourceId: string): CodeProvider {
+    if (Object.values(SandboxTemplates).some((template) => template.id === sourceId)) {
+        return defaultCodeProvider();
+    }
+    return providerForSandboxId(sourceId);
 }
 
 /**

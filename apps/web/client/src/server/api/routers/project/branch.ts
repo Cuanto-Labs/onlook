@@ -1,4 +1,4 @@
-import { CodeProvider, getStaticCodeProvider } from '@onlook/code-provider';
+import { defaultCodeProvider, getStaticCodeProvider } from '@onlook/code-provider';
 import { getSandboxPreviewUrl, SandboxTemplates, Templates } from '@onlook/constants';
 import { branches, branchInsertSchema, branchUpdateSchema, canvases, createDefaultFrame, frames, fromDbBranch, fromDbFrame } from '@onlook/db';
 import type { Frame } from '@onlook/models';
@@ -8,7 +8,12 @@ import { and, eq } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { z } from 'zod';
 import { createTRPCRouter, protectedProcedure } from '../../trpc';
-import { extractCsbPort, verifyBranchAccess, verifyProjectAccess } from './helper';
+import {
+    extractCsbPort,
+    providerForForkSource,
+    verifyBranchAccess,
+    verifyProjectAccess,
+} from './helper';
 
 // Helper function to get existing frames in a canvas
 async function getExistingFrames(tx: any, canvasId: string): Promise<Frame[]> {
@@ -120,8 +125,10 @@ export const branchRouter = createTRPCRouter({
                 const branchName: string = generateUniqueBranchName(sourceBranch.name, existingNames);
 
                 // Fork the sandbox using code provider
-                const CodesandboxProvider = await getStaticCodeProvider(CodeProvider.CodeSandbox);
-                const forkedSandbox = await CodesandboxProvider.createProject({
+                const SandboxProvider = await getStaticCodeProvider(
+                    providerForForkSource(sourceBranch.sandboxId),
+                );
+                const forkedSandbox = await SandboxProvider.createProject({
                     source: 'template',
                     id: sourceBranch.sandboxId,
                     title: branchName,
@@ -264,8 +271,8 @@ export const branchRouter = createTRPCRouter({
                     }
 
                     // Create new blank sandbox
-                    const CodesandboxProvider = await getStaticCodeProvider(CodeProvider.CodeSandbox);
-                    const blankSandbox = await CodesandboxProvider.createProject({
+                    const SandboxProvider = await getStaticCodeProvider(defaultCodeProvider());
+                    const blankSandbox = await SandboxProvider.createProject({
                         source: 'template',
                         id: SandboxTemplates[Templates.EMPTY_NEXTJS].id,
                         title: branchName,
