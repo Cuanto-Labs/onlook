@@ -1,0 +1,14 @@
+# BuildKit uses this instead of the root .dockerignore for deploy/cuanto/Dockerfile.
+# Keeps every bun workspace (root file drops apps/web/backend → frozen lockfile fails).
+**/node_modules
+.git
+**/.next
+**/.turbo
+**/.vercel
+**/*.tsbuildinfo
+**/.env
+**/.env.local
+**/.env.*.local
+**/*.log
+**/.DS_Store
+**/coverage
