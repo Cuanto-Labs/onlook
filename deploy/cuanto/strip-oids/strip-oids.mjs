@@ -3,6 +3,7 @@
 //   - data-oid="..." JSX attributes (added to every element Onlook touches)
 //   - the <Script id="onlook-preload-script"> tag Onlook injects into the root layout,
 //     plus its `next/script` import when nothing else uses <Script>
+//   - the `allowedDevOrigins` line tagged `// onlook-dev-origin` that the preview sandbox adds to next.config.*
 // Also reports public/onlook-preload-script.js and .onlook/ for manual removal.
 // Usage: node strip-oids.mjs [--check] <repo-dir>   (--check exits 1 if anything would change)
 import { execFileSync } from 'node:child_process';
@@ -14,10 +15,11 @@ const OID_ATTR = /\s+data-oid=(?:"[^"]*"|'[^']*'|\{\s*(?:"[^"]*"|'[^']*')\s*\})/
 const PRELOAD_SCRIPT =
     /\n?[ \t]*<Script\b(?=[^>]*\bid=(?:"onlook-preload-script"|'onlook-preload-script'|\{\s*["']onlook-preload-script["']\s*\}))[^>]*?(?:\/>|>\s*<\/Script>)/g;
 const SCRIPT_IMPORT = /^import\s+Script\s+from\s+["']next\/script["'];?[ \t]*\r?\n/m;
+const DEV_ORIGIN = /^[ \t]*allowedDevOrigins:.*\/\/ onlook-dev-origin[ \t]*\r?\n/gm;
 const ARTIFACTS = ['public/onlook-preload-script.js', '.onlook'];
 
 export function stripSource(src) {
-    let out = src.replace(OID_ATTR, '');
+    let out = src.replace(OID_ATTR, '').replace(DEV_ORIGIN, '');
     const before = out;
     out = out.replace(PRELOAD_SCRIPT, '');
     if (out !== before && !/<Script\b/.test(out)) {

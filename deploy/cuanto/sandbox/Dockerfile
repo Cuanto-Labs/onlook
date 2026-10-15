@@ -48,8 +48,11 @@ RUN mv /home/node/template /template \
     && chmod -R a+rX /template \
     && find /tmp -mindepth 1 -delete
 
+COPY ensure-dev-origins.mjs /usr/local/lib/onlook/ensure-dev-origins.mjs
+
 WORKDIR /app
 EXPOSE 3000
 
 # node_modules ships inside /template; if a project dir lacks it (e.g. copied from a repo), install first.
-CMD ["sh", "-lc", "[ -d node_modules ] || npm install; exec npm run dev -- -H 0.0.0.0 -p 3000"]
+# ensure-dev-origins: lets the tailnet preview origin load /_next dev resources (see the script).
+CMD ["sh", "-lc", "node /usr/local/lib/onlook/ensure-dev-origins.mjs; [ -d node_modules ] || npm install; exec npm run dev -- -H 0.0.0.0 -p 3000"]

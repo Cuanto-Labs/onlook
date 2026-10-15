@@ -8,8 +8,8 @@
 # or 0.0.0.0, so the same number can be used on both without a bind conflict. This script still refuses to
 # overwrite a serve mapping that points somewhere else (set FORCE=1 to replace it).
 #
-# Idempotent: ports already mapped to the right target are skipped. Run on deb:
-#   bash deploy/cuanto/serve-ports.sh
+# Idempotent: ports already mapped to the right target are skipped. Run on deb (tailscale serve needs root):
+#   sudo bash deploy/cuanto/serve-ports.sh
 set -euo pipefail
 
 TS="${TAILSCALE_BIN:-tailscale}"
@@ -54,7 +54,10 @@ serve_port() {
     echo "ERROR   :$https_port already serves '$cur', not $target (FORCE=1 to replace)" >&2
     return 1
   fi
-  "$TS" serve --bg --https="$https_port" "$target" >/dev/null
+  if ! "$TS" serve --bg --https="$https_port" "$target" >/dev/null; then
+    echo "FAILED  :$https_port -> $target (needs root or 'tailscale set --operator')" >&2
+    return 1
+  fi
   echo "served  :$https_port -> $target"
 }
 

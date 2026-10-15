@@ -43,3 +43,14 @@ test('leaves clean source untouched', () => {
     const src = `const a = <div className="data-oid">ok</div>;`;
     assert.equal(stripSource(src), src);
 });
+
+test('removes the sandbox allowedDevOrigins line, keeps user config', async () => {
+    const { addDevOrigin } = await import('../sandbox/ensure-dev-origins.mjs');
+    const cfg = 'const nextConfig: NextConfig = {\n  reactStrictMode: true,\n};\nexport default nextConfig;\n';
+    const added = addDevOrigin(cfg);
+    assert.ok(added.includes('allowedDevOrigins'));
+    assert.equal(addDevOrigin(added), added);
+    assert.equal(stripSource(added), cfg);
+    const cjs = 'module.exports = {\n  output: "standalone",\n};\n';
+    assert.equal(stripSource(addDevOrigin(cjs)), cjs);
+});
