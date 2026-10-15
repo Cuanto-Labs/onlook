@@ -1,0 +1,18 @@
+# BuildKit uses this instead of the root .dockerignore for deploy/cuanto/runner/Dockerfile.
+# Context is the repo root but only apps/runner is copied; keep the context small.
+**/node_modules
+.git
+**/.next
+**/.turbo
+**/.vercel
+apps/web
+apps/backend
+apps/admin
+packages
+docs
+assets
+**/.env
+**/.env.local
+**/*.log
+**/.DS_Store
+**/dist

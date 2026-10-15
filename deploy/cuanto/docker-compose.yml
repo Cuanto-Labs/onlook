@@ -22,3 +22,24 @@ services:
     restart: unless-stopped
     mem_limit: 1536m
     memswap_limit: 1536m
+
+  # Preview runner: one Docker container per Onlook project (see runner/API.md). Build the sandbox image first:
+  #   docker build -t onlook-sandbox:1 deploy/cuanto/sandbox
+  # Runs as root INSIDE its container: it chowns project dirs to 1000:1000 and uses the host docker.sock.
+  # /opt/onlook/projects is mounted at the same path so bind-mount paths it hands to Docker are valid on the host.
+  # Needs RUNNER_SECRET (>= 32 chars) in /opt/onlook/onlook.env; web shares it to sign tokens.
+  runner:
+    container_name: onlook-runner
+    build:
+      context: ../..
+      dockerfile: deploy/cuanto/runner/Dockerfile
+    env_file:
+      - /opt/onlook/onlook.env
+    network_mode: host
+    user: root
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/onlook/projects:/opt/onlook/projects
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
