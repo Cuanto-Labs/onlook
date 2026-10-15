@@ -16,6 +16,9 @@ services:
     env_file:
       - /opt/onlook/onlook.env
     network_mode: host
+    # deb's resolver maps *.ts.net to public IPv6, not MagicDNS; server-side Supabase calls hang without this.
+    extra_hosts:
+      - "deb.tail789fa0.ts.net:100.117.179.10"
     restart: unless-stopped
     mem_limit: 1536m
     memswap_limit: 1536m
