@@ -1,0 +1,21 @@
+# Onlook web app on deb. Run from repo root:
+#   docker compose -f deploy/cuanto/docker-compose.yml --env-file /opt/onlook/onlook.env up -d --build
+# Host networking: binds 127.0.0.1:3100 only and reaches Supabase on 127.0.0.1:54321/54322.
+name: onlook
+services:
+  web:
+    container_name: onlook-web
+    build:
+      context: ../..
+      dockerfile: deploy/cuanto/Dockerfile
+      args:
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL}
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+        NEXT_PUBLIC_PASSWORD_LOGIN: ${NEXT_PUBLIC_PASSWORD_LOGIN:-true}
+    env_file:
+      - /opt/onlook/onlook.env
+    network_mode: host
+    restart: unless-stopped
+    mem_limit: 1536m
+    memswap_limit: 1536m

@@ -1,0 +1,41 @@
+# Overrides for the official supabase/docker compose (copied to /opt/onlook/supabase).
+# Ports bound to localhost only (deb sits on a shared LAN), unique container names, memory caps.
+services:
+  studio:
+    container_name: onlook-sb-studio
+    mem_limit: 384m
+  api-gw:
+    container_name: onlook-sb-gateway
+    mem_limit: 128m
+    ports: !override
+      - 127.0.0.1:54321:8000/tcp
+  auth:
+    container_name: onlook-sb-auth
+    mem_limit: 128m
+  rest:
+    container_name: onlook-sb-rest
+    mem_limit: 128m
+  realtime:
+    container_name: onlook-sb-realtime
+    mem_limit: 384m
+  storage:
+    container_name: onlook-sb-storage
+    mem_limit: 256m
+  imgproxy:
+    container_name: onlook-sb-imgproxy
+    mem_limit: 256m
+  meta:
+    container_name: onlook-sb-meta
+    mem_limit: 192m
+  functions:
+    container_name: onlook-sb-functions
+    mem_limit: 256m
+  db:
+    container_name: onlook-sb-db
+    mem_limit: 1024m
+  supavisor:
+    container_name: onlook-sb-pooler
+    mem_limit: 384m
+    ports: !override
+      - 127.0.0.1:54322:5432
+      - 127.0.0.1:54323:6543

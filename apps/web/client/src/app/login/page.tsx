@@ -10,9 +10,11 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { DevLoginButton, LoginButton } from '../_components/login-button';
+import { PasswordLoginForm } from '../_components/password-login-form';
 
 export default function LoginPage() {
     const isDev = process.env.NODE_ENV === 'development';
+    const isPasswordLogin = process.env.NEXT_PUBLIC_PASSWORD_LOGIN === 'true';
     const t = useTranslations();
     const backgroundUrl = useGetBackground('login');
     const returnUrl = useSearchParams().get(LocalForageKeys.RETURN_URL);
@@ -34,6 +36,9 @@ export default function LoginPage() {
                             {t(transKeys.welcome.description)}
                         </p>
                     </div>
+                    {isPasswordLogin ? (
+                        <PasswordLoginForm />
+                    ) : (
                     <div className="space-y-2 md:space-y-0 md:space-x-2 flex flex-col md:flex-row">
                         <LoginButton
                             returnUrl={returnUrl}
@@ -50,6 +55,7 @@ export default function LoginPage() {
                             providerName="Google"
                         />
                     </div>
+                    )}
                     {isDev && <DevLoginButton returnUrl={returnUrl} />}
                     <p className="text-small text-foreground-onlook">
                         {t(transKeys.welcome.terms.agreement)}{' '}
