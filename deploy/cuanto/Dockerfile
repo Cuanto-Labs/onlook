@@ -18,7 +18,9 @@ COPY . .
 RUN bun install --frozen-lockfile
 RUN cd apps/web/client && bun run build:standalone && test -f .next/standalone/apps/web/client/server.js
 
-FROM oven/bun:1.3.1
+# Runtime on Node: Next standalone under Bun double-sends Transfer-Encoding (tailscale 502)
+# and returns empty fetch bodies to supabase-js (JSON EOF on getUser).
+FROM node:22-bookworm-slim
 WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
@@ -27,5 +29,5 @@ ENV NODE_ENV=production \
 COPY --from=build /app/apps/web/client/.next/standalone ./
 WORKDIR /app/apps/web/client
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD bun -e "fetch('http://127.0.0.1:3100').then(r => process.exit(r.status < 500 ? 0 : 1)).catch(() => process.exit(1))"
-CMD ["bun", "server.js"]
+    CMD node -e "fetch('http://127.0.0.1:3100').then(r => process.exit(r.status < 500 ? 0 : 1)).catch(() => process.exit(1))"
+CMD ["node", "server.js"]
