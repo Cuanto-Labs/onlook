@@ -6,11 +6,12 @@ export enum LLMProvider {
 
 export enum OPENROUTER_MODELS {
     // Generate object does not work for Anthropic models https://github.com/OpenRouterTeam/ai-sdk-provider/issues/165
-    CLAUDE_4_5_SONNET = 'anthropic/claude-sonnet-4.5',
-    CLAUDE_3_5_HAIKU = 'anthropic/claude-3.5-haiku',
-    OPEN_AI_GPT_5 = 'openai/gpt-5',
-    OPEN_AI_GPT_5_MINI = 'openai/gpt-5-mini',
-    OPEN_AI_GPT_5_NANO = 'openai/gpt-5-nano',
+    // Cuanto: names kept for upstream compatibility; values point at models allowed by our OpenRouter workspace guardrail.
+    CLAUDE_4_5_SONNET = 'anthropic/claude-sonnet-5.5',
+    CLAUDE_3_5_HAIKU = 'anthropic/claude-haiku-5.5',
+    OPEN_AI_GPT_5 = 'openai/gpt-6.1-sol',
+    OPEN_AI_GPT_5_MINI = 'openai/gpt-6-luna',
+    OPEN_AI_GPT_5_NANO = 'google/gemini-3.5-flash-lite',
 }
 
 interface ModelMapping {
