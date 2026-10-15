@@ -36,6 +36,37 @@ export function parsePorcelainZ(out: string): string[] {
     return files;
 }
 
+export const MAX_EXEC_OUTPUT_BYTES = 1024 * 1024;
+export const TRUNCATION_NOTE = '\n[output truncated at 1 MB]\n';
+
+/** Accumulates exec output up to `max` bytes; later data is dropped and a note is appended to the result. */
+export function createOutputCapture(max = MAX_EXEC_OUTPUT_BYTES) {
+    let out = '';
+    let bytes = 0;
+    let truncated = false;
+    return {
+        push(s: string) {
+            if (truncated) return;
+            const len = Buffer.byteLength(s);
+            if (bytes + len <= max) {
+                out += s;
+                bytes += len;
+                return;
+            }
+            truncated = true;
+            const part = Buffer.from(s).subarray(0, max - bytes).toString('utf8').replace(/\uFFFD+$/, '');
+            out += part;
+            bytes = max;
+        },
+        get truncated() {
+            return truncated;
+        },
+        result() {
+            return truncated ? out + TRUNCATION_NOTE : out;
+        },
+    };
+}
+
 export const GIT_STATUS_CMD = 'git status --porcelain -z';
 
 export interface BgCommand {

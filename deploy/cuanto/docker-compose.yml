@@ -28,21 +28,37 @@ services:
 
   # Preview runner: one Docker container per Onlook project (see runner/API.md). Build the sandbox image first:
   #   docker build -t onlook-sandbox:1 deploy/cuanto/sandbox
-  # Runs as root INSIDE its container: it chowns project dirs to 1000:1000 and uses the host docker.sock.
+  # Runs as root INSIDE its container: it chowns project dirs to per-sandbox uids (61000+), runs project fs ops in
+  # per-sandbox unprivileged workers, and uses the host docker.sock.
   # /opt/onlook/projects is mounted at the same path so bind-mount paths it hands to Docker are valid on the host.
-  # Needs RUNNER_SECRET (>= 32 chars) in /opt/onlook/onlook.env; web shares it to sign tokens.
+  # Only the variables listed below reach it (NOT the whole onlook.env: it holds Supabase/service keys that must not
+  # sit in the env of a root process next to docker.sock). Needs RUNNER_SECRET (>= 32 chars) in /opt/onlook/onlook.env
+  # (passed via --env-file); web shares it to sign tokens.
   runner:
     container_name: onlook-runner
     build:
       context: ../..
       dockerfile: deploy/cuanto/runner/Dockerfile
-    env_file:
-      - /opt/onlook/onlook.env
+    environment:
+      RUNNER_SECRET: ${RUNNER_SECRET:?RUNNER_SECRET (>= 32 chars) is required}
+      RUNNER_HOST: ${RUNNER_HOST:-127.0.0.1}
+      RUNNER_PORT: ${RUNNER_PORT:-3102}
+      PROJECTS_DIR: ${PROJECTS_DIR:-/opt/onlook/projects}
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-onlook-sandbox:1}
+      PORT_MIN: ${PORT_MIN:-4900}
+      PORT_MAX: ${PORT_MAX:-4919}
+      MAX_RUNNING: ${MAX_RUNNING:-4}
+      IDLE_MINUTES: ${IDLE_MINUTES:-30}
+      SANDBOX_MEM_MB: ${SANDBOX_MEM_MB:-1536}
+      SANDBOX_CPUS: ${SANDBOX_CPUS:-2}
+      SANDBOX_UID_BASE: ${SANDBOX_UID_BASE:-61000}
+      SANDBOX_NETWORK: ${SANDBOX_NETWORK:-onlook-sbx}
     network_mode: host
     user: root
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /opt/onlook/projects:/opt/onlook/projects
+      - ${PROJECTS_DIR:-/opt/onlook/projects}:${PROJECTS_DIR:-/opt/onlook/projects}
     restart: unless-stopped
-    mem_limit: 512m
-    memswap_limit: 512m
+    # one node worker (~40 MB) per sandbox with recent fs activity, on top of the runner itself
+    mem_limit: 1024m
+    memswap_limit: 1024m

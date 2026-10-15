@@ -25,15 +25,18 @@ export class MockRuntime implements ContainerRuntime {
     execCalls: { id: string; command: string }[] = [];
     execResult: ExecResult = { output: '', exitCode: 0 };
 
+    async init() {}
     async runningIds() {
         return new Set(this.running);
     }
     async isRunning(id: string) {
         return this.running.has(id);
     }
-    async start(id: string) {
+    startIdentities: { uid: number; gid: number }[] = [];
+    async start(id: string, _port: number, identity: { uid: number; gid: number }) {
         this.running.add(id);
         this.started.push(id);
+        this.startIdentities.push(identity);
     }
     async stop(id: string) {
         this.running.delete(id);

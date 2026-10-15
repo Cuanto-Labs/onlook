@@ -5,6 +5,7 @@ Contract between `apps/runner` (server, on deb) and `packages/code-provider/src/
 ## Topology
 - Runner listens on `127.0.0.1:3102` (host network). Browser reaches it at `NEXT_PUBLIC_RUNNER_URL` (`https://deb.tail789fa0.ts.net:4812`, tailscale serve); onlook-web server at `RUNNER_INTERNAL_URL` (`http://127.0.0.1:3102`).
 - One Docker container per sandbox: name `onlook-sbx-<id>`, image `onlook-sandbox:1`, `/app` = bind mount of `${PROJECTS_DIR}/<id>` (default `/opt/onlook/projects`), container port 3000 published to `127.0.0.1:<port>`.
+- Each sandbox runs as its own unprivileged uid:gid `SANDBOX_UID_BASE + (port - PORT_MIN)` (default base 61000, so port 4900 = 61000), `HOME=/tmp`, on the dedicated docker bridge network `onlook-sbx` (inter-container traffic disabled, `enable_icc=false`; created by the runner at startup if missing). `/app` host dir is owned by that uid, mode 0700. Container limits: 512 pids, `nofile` 4096.
 - Preview URL for a sandbox: `https://${NEXT_PUBLIC_SANDBOX_PREVIEW_HOST}:<port>` (host `deb.tail789fa0.ts.net`).
 
 ## Sandbox ids
@@ -19,10 +20,17 @@ Contract between `apps/runner` (server, on deb) and `packages/code-provider/src/
 - Missing/invalid/expired → 401 `{ "error": "unauthorized" }`; wrong sandbox → 403. Constant-time compare.
 
 ## Paths
-All `path` values are relative to the project root (`/app` in the container). Leading `/`, `./`, and a leading `/project/workspace/` are stripped. Anything resolving outside the root (`..`, absolute escape, symlink escape via realpath) → 400 `{ "error": "invalid path" }`.
+All `path` values are relative to the project root (`/app` in the container). Leading `/`, `./`, and a leading `/project/workspace/` are stripped. Anything resolving outside the root (`..`, absolute escape, symlink escape via realpath) → 400 `{ "error": "invalid path" }`. All project fs routes (and `/watch`, `/fs/download`) execute in a per-sandbox worker process running as that sandbox's uid with an empty environment, never as the runner's root user; a path swapped for a symlink after validation can only reach what the sandbox itself could already access.
 
 ## Errors
-JSON `{ "error": string }` with 400 (bad input), 401, 403, 404 (no such sandbox/file), 409 (exists, overwrite=false), 503 (capacity: no free port), 500.
+JSON `{ "error": string }` with 400 (bad input), 401, 403, 404 (no such sandbox/file), 409 (exists, overwrite=false), 413 (payload too large), 503 (capacity: no free port), 500.
+
+## Limits
+- Request bodies: 64 KB for every route except `PUT /fs/write` (70 MB) → 413 `{ "error": "payload too large" }`.
+- `GET /fs/read`: files over 10 MB → 413 `{ "error": "file too large" }` (use `/fs/download` for big files).
+- `POST /exec` and `git-status`: merged output capped at 1 MB; the rest is dropped and `\n[output truncated at 1 MB]\n` is appended (exit code still reported).
+- WebSocket: client frames ≤ 1 MiB (larger closes the socket). Server pauses the container stream while > 4 MB is buffered on the socket and resumes once drained.
+- `/watch`: at most 2 sockets per sandbox; opening a third closes the oldest (close code 1008). The watcher does not follow symlinks.
 
 ## REST routes (JSON bodies, `Content-Type: application/json`)
 | Method + route | Body / query | Response |
@@ -36,7 +44,7 @@ JSON `{ "error": string }` with 400 (bad input), 401, 403, 404 (no such sandbox/
 | `POST /sandboxes/:id/ping` | – | `{}`; bumps lastActive (idle reaper stops after `IDLE_MINUTES`, default 30) |
 | `GET /sandboxes/:id/fs/stat?path=` | – | `{ "type": "file"\|"directory", "isSymlink", "size", "mtime", "ctime", "atime" }` (ms epoch) |
 | `GET /sandboxes/:id/fs/list?path=` | – | `{ "files": [{ "name", "type": "file"\|"directory", "isSymlink" }] }` |
-| `GET /sandboxes/:id/fs/read?path=` | – | `{ "type": "text", "content": string }` or `{ "type": "binary", "content": base64 }` (binary = contains a NUL byte in first 8 KB or known binary extension) |
+| `GET /sandboxes/:id/fs/read?path=` | – | (≤ 10 MB) `{ "type": "text", "content": string }` or `{ "type": "binary", "content": base64 }` (binary = contains a NUL byte in first 8 KB or known binary extension) |
 | `PUT /sandboxes/:id/fs/write` | `{ "path", "content", "encoding": "utf8"\|"base64", "overwrite"?: boolean (default true) }` | `{ "success": true }`; creates parent dirs |
 | `POST /sandboxes/:id/fs/rename` | `{ "oldPath", "newPath" }` | `{}` |
 | `POST /sandboxes/:id/fs/copy` | `{ "sourcePath", "targetPath", "recursive"?, "overwrite"? }` | `{}` |

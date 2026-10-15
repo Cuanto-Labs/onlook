@@ -10,6 +10,10 @@ export interface Config {
     idleMinutes: number;
     sandboxMemMb: number;
     sandboxCpus: number;
+    /** First per-sandbox uid/gid; sandbox uid = uidBase + (port - portMin). */
+    uidBase: number;
+    /** Dedicated docker bridge network for sandbox containers (icc disabled). */
+    sandboxNetwork: string;
 }
 
 function int(env: NodeJS.ProcessEnv, key: string, dflt: number, min = 1): number {
@@ -43,7 +47,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         idleMinutes: int(env, 'IDLE_MINUTES', 30),
         sandboxMemMb: int(env, 'SANDBOX_MEM_MB', 1536),
         sandboxCpus: num(env, 'SANDBOX_CPUS', 2),
+        uidBase: int(env, 'SANDBOX_UID_BASE', 61000, 1000),
+        sandboxNetwork: env.SANDBOX_NETWORK || 'onlook-sbx',
     };
     if (cfg.portMax < cfg.portMin) throw new Error('PORT_MAX must be >= PORT_MIN');
+    if (cfg.uidBase + (cfg.portMax - cfg.portMin) > 4_000_000_000) throw new Error('SANDBOX_UID_BASE too large');
     return cfg;
+}
+
+export interface SandboxIdentity {
+    uid: number;
+    gid: number;
+}
+
+/** Per-sandbox uid/gid: uidBase + (port - portMin). Every sandbox gets a distinct unprivileged identity. */
+export function sandboxIdentity(cfg: Pick<Config, 'uidBase' | 'portMin' | 'portMax'>, port: number): SandboxIdentity {
+    if (!Number.isInteger(port) || port < cfg.portMin || port > cfg.portMax) {
+        throw new Error(`port ${port} outside PORT_MIN..PORT_MAX`);
+    }
+    const id = cfg.uidBase + (port - cfg.portMin);
+    return { uid: id, gid: id };
 }

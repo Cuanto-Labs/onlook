@@ -1,21 +1,12 @@
 import { Hono, type Context } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { cors } from 'hono/cors';
 import { Readable } from 'node:stream';
 import { bearerToken, canAccess, isAdmin, verifyToken } from './auth.js';
 import type { Config } from './config.js';
 import { HttpError } from './errors.js';
 import { clampTimeout } from './exec.js';
-import {
-    fsCopy,
-    fsDelete,
-    fsDownload,
-    fsList,
-    fsMkdir,
-    fsRead,
-    fsRename,
-    fsStat,
-    fsWrite,
-} from './fs.js';
+import type { FsClientOptions } from './fsclient.js';
 import { isValidId } from './ports.js';
 import type { ContainerRuntime } from './runtime.js';
 import { SandboxService } from './sandboxes.js';
@@ -28,15 +19,26 @@ export interface Deps {
     service: SandboxService;
 }
 
-export function createDeps(config: Config, registry: Registry, runtime: ContainerRuntime): Deps {
-    return { config, registry, runtime, service: new SandboxService(config, registry, runtime) };
+export function createDeps(
+    config: Config,
+    registry: Registry,
+    runtime: ContainerRuntime,
+    fsOpts?: FsClientOptions,
+): Deps {
+    return { config, registry, runtime, service: new SandboxService(config, registry, runtime, fsOpts) };
 }
+
+/** Request body caps: only fs/write may carry a big (base64 file) payload. */
+export const MAX_BODY_BYTES = 64 * 1024;
+export const MAX_WRITE_BODY_BYTES = 70 * 1024 * 1024;
 
 async function jsonBody(c: Context): Promise<Record<string, unknown>> {
     let b: unknown;
     try {
         b = await c.req.json();
-    } catch {
+    } catch (e) {
+        // chunked body past the cap: let the bodyLimit middleware turn it into a 413
+        if (e instanceof Error && e.name === 'BodyLimitError') throw e;
         throw new HttpError(400, 'invalid json');
     }
     if (typeof b !== 'object' || b === null || Array.isArray(b)) throw new HttpError(400, 'invalid body');
@@ -77,6 +79,15 @@ export function createApp(deps: Deps): Hono {
     // Authentication + authorisation + activity tracking for everything under /sandboxes.
     app.use('*', authMiddleware(config, deps.registry));
 
+    const tooLarge = (c: Context) => c.json({ error: 'payload too large' }, 413);
+    const smallBody = bodyLimit({ maxSize: MAX_BODY_BYTES, onError: tooLarge });
+    const writeBody = bodyLimit({ maxSize: MAX_WRITE_BODY_BYTES, onError: tooLarge });
+    app.use('*', (c, next) =>
+        c.req.method === 'PUT' && /^\/sandboxes\/[^/]+\/fs\/write$/.test(c.req.path)
+            ? writeBody(c, next)
+            : smallBody(c, next),
+    );
+
     const sandboxId = (c: Context) => c.req.param('id') as string;
 
     app.post('/sandboxes', async (c) => {
@@ -112,30 +123,30 @@ export function createApp(deps: Deps): Hono {
     app.post('/sandboxes/:id/ping', (c) => c.json({}));
 
     // ---- filesystem
-    const root = (c: Context) => service.dirFor(sandboxId(c));
+    // Every project fs call runs in the sandbox's own unprivileged worker (see fsclient.ts), never as root here.
+    const root = (c: Context) => service.fsFor(sandboxId(c));
 
-    app.get('/sandboxes/:id/fs/stat', async (c) => c.json(await fsStat(root(c), queryPath(c, true))));
-    app.get('/sandboxes/:id/fs/list', async (c) => c.json(await fsList(root(c), queryPath(c, false))));
-    app.get('/sandboxes/:id/fs/read', async (c) => c.json(await fsRead(root(c), queryPath(c, true))));
+    app.get('/sandboxes/:id/fs/stat', async (c) => c.json(await root(c).stat(queryPath(c, true))));
+    app.get('/sandboxes/:id/fs/list', async (c) => c.json(await root(c).list(queryPath(c, false))));
+    app.get('/sandboxes/:id/fs/read', async (c) => c.json(await root(c).read(queryPath(c, true))));
 
     app.put('/sandboxes/:id/fs/write', async (c) => {
         const b = await jsonBody(c);
         const encoding = b.encoding === undefined ? 'utf8' : b.encoding;
         if (encoding !== 'utf8' && encoding !== 'base64') throw new HttpError(400, 'invalid encoding');
-        await fsWrite(root(c), reqString(b, 'path'), reqString(b, 'content'), encoding, optBool(b, 'overwrite') ?? true);
+        await root(c).write(reqString(b, 'path'), reqString(b, 'content'), encoding, optBool(b, 'overwrite') ?? true);
         return c.json({ success: true });
     });
 
     app.post('/sandboxes/:id/fs/rename', async (c) => {
         const b = await jsonBody(c);
-        await fsRename(root(c), reqString(b, 'oldPath'), reqString(b, 'newPath'));
+        await root(c).rename(reqString(b, 'oldPath'), reqString(b, 'newPath'));
         return c.json({});
     });
 
     app.post('/sandboxes/:id/fs/copy', async (c) => {
         const b = await jsonBody(c);
-        await fsCopy(
-            root(c),
+        await root(c).copy(
             reqString(b, 'sourcePath'),
             reqString(b, 'targetPath'),
             optBool(b, 'recursive') ?? false,
@@ -145,17 +156,17 @@ export function createApp(deps: Deps): Hono {
     });
 
     app.post('/sandboxes/:id/fs/mkdir', async (c) => {
-        await fsMkdir(root(c), reqString(await jsonBody(c), 'path'));
+        await root(c).mkdir(reqString(await jsonBody(c), 'path'));
         return c.json({});
     });
 
     app.delete('/sandboxes/:id/fs', async (c) => {
-        await fsDelete(root(c), queryPath(c, true), c.req.query('recursive') === 'true');
+        await root(c).delete(queryPath(c, true), c.req.query('recursive') === 'true');
         return c.json({});
     });
 
     app.get('/sandboxes/:id/fs/download', async (c) => {
-        const stream = await fsDownload(root(c), queryPath(c, false));
+        const stream = await root(c).download(queryPath(c, false));
         return new Response(Readable.toWeb(stream) as ReadableStream, {
             headers: { 'content-type': 'application/gzip' },
         });
@@ -177,6 +188,7 @@ export function createApp(deps: Deps): Hono {
 
     app.notFound((c) => c.json({ error: 'not found' }, 404));
     app.onError((err, c) => {
+        if (err.name === 'BodyLimitError') return tooLarge(c);
         if (err instanceof HttpError) return c.json({ error: err.message }, err.status);
         console.error('[runner] unhandled:', err instanceof Error ? err.stack : err);
         return c.json({ error: 'internal error' }, 500);

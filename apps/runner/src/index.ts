@@ -12,6 +12,10 @@ const registry = new Registry(config.projectsDir, config.portMin, config.portMax
 const runtime = new DockerRuntime(config);
 const deps = createDeps(config, registry, runtime);
 
+// Fail fast (and before listening) if Docker is unreachable or project dirs can't be re-owned.
+await runtime.init();
+await deps.service.ensureOwnership();
+
 const server = serve(
     { fetch: createApp(deps).fetch, hostname: config.host, port: config.port },
     (info) => console.log(`[runner] listening on ${info.address}:${info.port}`),

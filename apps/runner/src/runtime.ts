@@ -9,6 +9,9 @@ export interface StreamHandle {
     resize(cols: number, rows: number): Promise<void>;
     /** Tear down the local stream (does not necessarily kill the remote process). */
     close(): void;
+    /** Stop reading from the container (backpressure); `resume` continues. */
+    pause(): void;
+    resume(): void;
     /** Resolves with the exit code once the process ends. */
     done: Promise<number>;
 }
@@ -23,15 +26,19 @@ export interface OpenStreamOptions {
 
 export interface LogFollow {
     close(): void;
+    pause(): void;
+    resume(): void;
     /** Resolves when the log stream ends (container stopped / restarted / closed). */
     ended: Promise<void>;
 }
 
 export interface ContainerRuntime {
+    /** Startup: ensure the isolated sandbox network exists, sweep leftover `onlook.tmp` containers. */
+    init(): Promise<void>;
     runningIds(): Promise<Set<string>>;
     isRunning(id: string): Promise<boolean>;
     /** Create + start the container and wait until its port answers HTTP. Idempotent when running. */
-    start(id: string, port: number): Promise<void>;
+    start(id: string, port: number, identity: { uid: number; gid: number }): Promise<void>;
     /** Stop and remove the container. Idempotent. */
     stop(id: string): Promise<void>;
     exec(id: string, command: string, timeoutMs: number): Promise<ExecResult>;

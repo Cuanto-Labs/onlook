@@ -1,4 +1,4 @@
-import type { Stats } from 'node:fs';
+import { constants as fsConstants, type Stats } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -6,7 +6,7 @@ import * as tar from 'tar';
 import { fsError, HttpError } from './errors.js';
 import { invalidPath, resolveSafe } from './paths.js';
 
-const MAX_READ_BYTES = 50 * 1024 * 1024;
+export const MAX_READ_BYTES = 10 * 1024 * 1024;
 const BINARY_EXT = new Set([
     '.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.ico', '.bmp', '.tiff', '.pdf', '.zip', '.gz',
     '.tar', '.tgz', '.7z', '.rar', '.woff', '.woff2', '.ttf', '.otf', '.eot', '.mp3', '.mp4', '.mov',
@@ -90,13 +90,26 @@ export const fsRead = (
 ): Promise<{ type: 'text' | 'binary'; content: string }> =>
     guard(async () => {
         const abs = await resolveSafe(root, p);
-        const st = await fs.stat(abs);
-        if (st.isDirectory()) throw invalidPath();
-        if (st.size > MAX_READ_BYTES) throw new HttpError(400, 'file too large');
-        const buf = await fs.readFile(abs);
-        return isBinary(abs, buf)
-            ? { type: 'binary', content: buf.toString('base64') }
-            : { type: 'text', content: buf.toString('utf8') };
+        // O_NONBLOCK: opening a FIFO planted by the sandbox must not hang the worker.
+        const fh = await fs.open(abs, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+        try {
+            const st = await fh.stat();
+            if (st.isDirectory() || !st.isFile()) throw invalidPath();
+            if (st.size > MAX_READ_BYTES) throw new HttpError(413, 'file too large');
+            const buf = Buffer.alloc(st.size);
+            let off = 0;
+            while (off < buf.length) {
+                const { bytesRead } = await fh.read(buf, off, buf.length - off, off);
+                if (bytesRead === 0) break;
+                off += bytesRead;
+            }
+            const data = off === buf.length ? buf : buf.subarray(0, off);
+            return isBinary(abs, data)
+                ? { type: 'binary', content: data.toString('base64') }
+                : { type: 'text', content: data.toString('utf8') };
+        } finally {
+            await fh.close();
+        }
     });
 
 export const fsWrite = (
@@ -189,3 +202,11 @@ export async function fsDownload(root: string, p: string): Promise<Readable> {
         return Readable.from(pack as AsyncIterable<Buffer>, { objectMode: false });
     });
 }
+
+/** Delete everything inside the project dir (not the dir itself). Runs as the sandbox uid inside the worker. */
+export const fsPurge = (root: string): Promise<void> =>
+    guard(async () => {
+        for (const name of await fs.readdir(root)) {
+            await fs.rm(path.join(root, name), { recursive: true, force: true });
+        }
+    });

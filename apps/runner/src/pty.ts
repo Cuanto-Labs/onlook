@@ -1,6 +1,6 @@
 import type { WebSocket } from 'ws';
 import type { ContainerRuntime } from './runtime.js';
-import { parseMsg, sendJson, type WsContext } from './wsutil.js';
+import { Flow, parseMsg, sendJson, type WsContext } from './wsutil.js';
 
 const clamp = (n: number, dflt: number) => (Number.isFinite(n) && n >= 1 ? Math.min(Math.floor(n), 500) : dflt);
 
@@ -8,11 +8,13 @@ const clamp = (n: number, dflt: number) => (Number.isFinite(n) && n >= 1 ? Math.
 export async function handlePty(ws: WebSocket, ctx: WsContext, runtime: ContainerRuntime) {
     const cols = clamp(Number(ctx.url.searchParams.get('cols')), 80);
     const rows = clamp(Number(ctx.url.searchParams.get('rows')), 24);
+    const flow = new Flow(ws);
     const handle = await runtime.openStream(
         ctx.id,
         { cmd: ['bash'], tty: true, stdin: true, cols, rows },
-        (data) => sendJson(ws, { type: 'output', data }),
+        (data) => flow.send({ type: 'output', data }),
     );
+    flow.attach(handle);
     handle.done.then((code) => {
         sendJson(ws, { type: 'exit', code });
         ws.close(1000, 'exit');

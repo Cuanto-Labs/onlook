@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { allocatePort, newSandboxId } from './ports.js';
+import { allocatePort, isValidId, newSandboxId } from './ports.js';
 
 export interface SandboxRecord {
     id: string;
@@ -16,6 +16,25 @@ interface StateFile {
     sandboxes: SandboxRecord[];
 }
 
+/**
+ * Accept only well-formed records: the id is used to build host paths and container names, so a corrupt or
+ * tampered state file must not be able to smuggle `../` or odd characters through.
+ */
+export function validRecord(r: unknown): SandboxRecord | null {
+    if (typeof r !== 'object' || r === null) return null;
+    const o = r as Record<string, unknown>;
+    if (typeof o.id !== 'string' || !isValidId(o.id)) return null;
+    if (typeof o.port !== 'number' || !Number.isInteger(o.port) || o.port < 1 || o.port > 65535) return null;
+    if (!o.id.startsWith(`dk${o.port}-`)) return null;
+    const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null);
+    const createdAt = num(o.createdAt);
+    const lastActive = num(o.lastActive);
+    if (createdAt === null || lastActive === null) return null;
+    const rec: SandboxRecord = { id: o.id, port: o.port, createdAt, lastActive };
+    if (typeof o.title === 'string') rec.title = o.title;
+    return rec;
+}
+
 /** Sandbox registry + port allocator, persisted atomically (tmp + rename) to `<projectsDir>/.state.json`. */
 export class Registry {
     private readonly byId = new Map<string, SandboxRecord>();
@@ -29,6 +48,9 @@ export class Registry {
     ) {
         this.file = path.join(projectsDir, '.state.json');
         fs.mkdirSync(projectsDir, { recursive: true });
+        // Root-owned, traversable (so sandbox uids can reach their own 0700 subdir) but not listable.
+        if (process.getuid?.() === 0) fs.chownSync(projectsDir, 0, 0);
+        fs.chmodSync(projectsDir, 0o711);
         this.load();
     }
 
@@ -40,15 +62,26 @@ export class Registry {
             if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
             throw e;
         }
-        const parsed = JSON.parse(raw) as StateFile;
-        for (const r of parsed.sandboxes ?? []) this.byId.set(r.id, r);
+        const parsed = JSON.parse(raw) as Partial<StateFile>;
+        const list: unknown[] = Array.isArray(parsed.sandboxes) ? parsed.sandboxes : [];
+        for (const r of list) {
+            const rec = validRecord(r);
+            // one sandbox per port: the port also fixes the sandbox's uid
+            if (rec && ![...this.byId.values()].some((x) => x.port === rec.port)) this.byId.set(rec.id, rec);
+            else console.warn('[state] dropped invalid sandbox record');
+        }
+        try {
+            fs.chmodSync(this.file, 0o600);
+        } catch {
+            // best effort; flush() rewrites with 0600 anyway
+        }
     }
 
     /** Atomic write: tmp file in the same dir, then rename over the state file. */
     flush() {
         const data: StateFile = { version: 1, sandboxes: [...this.byId.values()] };
         const tmp = `${this.file}.${process.pid}.tmp`;
-        fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+        fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
         fs.renameSync(tmp, this.file);
         this.dirty = false;
     }

@@ -1,12 +1,11 @@
 import Docker from 'dockerode';
-import { execFile } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { StringDecoder } from 'node:string_decoder';
 import { Writable } from 'node:stream';
 import * as tar from 'tar';
 import type { Config } from './config.js';
 import { HttpError } from './errors.js';
-import { wrapShell } from './exec.js';
+import { createOutputCapture, wrapShell } from './exec.js';
 import type {
     ContainerRuntime,
     ExecResult,
@@ -17,7 +16,8 @@ import type {
 
 export const LABEL = 'onlook.sbx';
 export const containerName = (id: string) => `onlook-sbx-${id}`;
-const SANDBOX_UID = 1000;
+const TMP_LABEL = 'onlook.tmp';
+const NOFILE = 4096;
 const READY_TIMEOUT_MS = 90_000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -37,14 +37,6 @@ function decodingSink(onData: (s: string) => void): Writable {
             cb();
         },
     });
-}
-
-/** chown -R 1000:1000 (only meaningful as root, which the runner container is). */
-export function chownSandbox(dir: string): Promise<void> {
-    if (process.getuid?.() !== 0) return Promise.resolve();
-    return new Promise((resolve, reject) =>
-        execFile('chown', ['-R', `${SANDBOX_UID}:${SANDBOX_UID}`, dir], (err) => (err ? reject(err) : resolve())),
-    );
 }
 
 /** Wait for any HTTP response on 127.0.0.1:port. */
@@ -80,6 +72,41 @@ export class DockerRuntime implements ContainerRuntime {
         this.docker = new Docker({ socketPath });
     }
 
+    /**
+     * Create the dedicated sandbox bridge network if missing. icc is disabled so sandboxes cannot reach each
+     * other (or anything else on the bridge) container-to-container; published ports on 127.0.0.1 still work.
+     */
+    async ensureNetwork(): Promise<void> {
+        const name = this.cfg.sandboxNetwork;
+        const existing = await this.docker.listNetworks({ filters: { name: [name] } });
+        if (existing.some((n) => n.Name === name)) return;
+        try {
+            await this.docker.createNetwork({
+                Name: name,
+                Driver: 'bridge',
+                CheckDuplicate: true,
+                Options: { 'com.docker.network.bridge.enable_icc': 'false' },
+                Labels: { 'onlook.net': '1' },
+            });
+        } catch (e) {
+            if ((e as { statusCode?: number }).statusCode === 409) return; // created concurrently
+            throw e;
+        }
+    }
+
+    /** Remove half-finished template-copy containers left behind by a runner crash. */
+    async sweepTmpContainers(): Promise<number> {
+        const list = await this.docker.listContainers({ all: true, filters: { label: [TMP_LABEL] } });
+        for (const c of list) await this.docker.getContainer(c.Id).remove({ force: true }).catch(() => undefined);
+        return list.length;
+    }
+
+    async init(): Promise<void> {
+        await this.ensureNetwork();
+        const n = await this.sweepTmpContainers();
+        if (n) console.log(`[runner] removed ${n} leftover ${TMP_LABEL} container(s)`);
+    }
+
     private c(id: string) {
         return this.docker.getContainer(containerName(id));
     }
@@ -109,16 +136,18 @@ export class DockerRuntime implements ContainerRuntime {
         return (await this.inspect(id))?.State.Running ?? false;
     }
 
-    async start(id: string, port: number): Promise<void> {
+    async start(id: string, port: number, identity: { uid: number; gid: number }): Promise<void> {
         const info = await this.inspect(id);
         if (info?.State.Running) return;
         if (info) await this.c(id).remove({ force: true }); // recreate so current limits/image apply
+        await this.ensureNetwork();
         const cfg = this.cfg;
         const container = await this.docker.createContainer({
             name: containerName(id),
             Image: cfg.sandboxImage,
-            User: `${SANDBOX_UID}:${SANDBOX_UID}`,
+            User: `${identity.uid}:${identity.gid}`,
             WorkingDir: '/app',
+            Env: ['HOME=/tmp', 'NEXT_TELEMETRY_DISABLED=1'],
             Labels: { [LABEL]: id },
             ExposedPorts: { '3000/tcp': {} },
             HostConfig: {
@@ -128,6 +157,8 @@ export class DockerRuntime implements ContainerRuntime {
                 MemorySwap: cfg.sandboxMemMb * 1024 * 1024,
                 NanoCpus: Math.round(cfg.sandboxCpus * 1e9),
                 PidsLimit: 512,
+                NetworkMode: cfg.sandboxNetwork,
+                Ulimits: [{ Name: 'nofile', Soft: NOFILE, Hard: NOFILE }],
                 CapDrop: ['ALL'],
                 SecurityOpt: ['no-new-privileges'],
                 RestartPolicy: { Name: 'no' },
@@ -153,18 +184,17 @@ export class DockerRuntime implements ContainerRuntime {
     }
 
     async exec(id: string, command: string, timeoutMs: number): Promise<ExecResult> {
-        let output = '';
+        // Keep draining after the cap (so the process finishes and reports a real exit code) but drop the data.
+        const capture = createOutputCapture();
         const handle = await this.openStream(
             id,
             { cmd: wrapShell(command, timeoutMs), tty: false, stdin: false },
-            (s) => {
-                output += s;
-            },
+            (s) => capture.push(s),
         );
         const hard = setTimeout(() => handle.close(), timeoutMs + 10_000);
         try {
             const exitCode = await handle.done;
-            return { output, exitCode };
+            return { output: capture.result(), exitCode };
         } finally {
             clearTimeout(hard);
         }
@@ -182,9 +212,9 @@ export class DockerRuntime implements ContainerRuntime {
             AttachStderr: true,
             AttachStdin: opts.stdin,
             Tty: opts.tty,
-            User: `${SANDBOX_UID}`,
+            // no User: the exec runs as the container's own per-sandbox uid:gid
             WorkingDir: '/app',
-            Env: ['TERM=xterm-256color', 'NEXT_TELEMETRY_DISABLED=1'],
+            Env: ['TERM=xterm-256color', 'HOME=/tmp', 'NEXT_TELEMETRY_DISABLED=1'],
         });
         const stream = await exec.start({ hijack: opts.stdin, stdin: opts.stdin, Tty: opts.tty });
         const sink = decodingSink(onData);
@@ -218,6 +248,8 @@ export class DockerRuntime implements ContainerRuntime {
                 if (opts.tty) await exec.resize({ w: cols, h: rows }).catch(() => undefined);
             },
             close: () => stream.destroy(),
+            pause: () => stream.pause(),
+            resume: () => stream.resume(),
             done,
         };
         if (opts.tty && opts.cols && opts.rows) await handle.resize(opts.cols, opts.rows);
@@ -239,7 +271,12 @@ export class DockerRuntime implements ContainerRuntime {
             stream.on('close', resolve);
             stream.on('error', () => resolve());
         });
-        return { close: () => stream.destroy(), ended };
+        return {
+            close: () => stream.destroy(),
+            pause: () => stream.pause(),
+            resume: () => stream.resume(),
+            ended,
+        };
     }
 
     async restart(id: string): Promise<void> {
@@ -250,7 +287,7 @@ export class DockerRuntime implements ContainerRuntime {
         const tmp = await this.docker.createContainer({
             Image: this.cfg.sandboxImage,
             Cmd: ['true'],
-            Labels: { 'onlook.tmp': '1' },
+            Labels: { [TMP_LABEL]: '1' },
             NetworkDisabled: true,
         });
         try {
@@ -259,7 +296,6 @@ export class DockerRuntime implements ContainerRuntime {
         } finally {
             await tmp.remove({ force: true }).catch(() => undefined);
         }
-        await chownSandbox(destDir);
     }
 
     async removeOrphans(known: Set<string>): Promise<string[]> {
