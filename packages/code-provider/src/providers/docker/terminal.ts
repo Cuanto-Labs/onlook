@@ -18,7 +18,7 @@ abstract class DockerOutputStream {
     protected socket: RunnerSocket | null = null;
     protected buffer: string[] = [];
     protected readonly listeners = new Set<(data: string) => void>();
-    private connecting: Promise<void> | null = null;
+    private connecting: Promise<RunnerSocket> | null = null;
     protected disposed = false;
 
     constructor(protected readonly client: RunnerClient) {}
@@ -50,13 +50,13 @@ abstract class DockerOutputStream {
                 .connect()
                 .then(() => {
                     this.socket = socket;
+                    return socket;
                 })
                 .finally(() => {
                     this.connecting = null;
                 });
         }
-        await this.connecting;
-        return this.socket as unknown as RunnerSocket;
+        return this.connecting;
     }
 
     /** Resolves once output has gone quiet (or a cap), so the initial log replay is captured. */
@@ -110,13 +110,14 @@ abstract class DockerOutputStream {
 
 export class DockerTerminal extends ProviderTerminal {
     private socket: RunnerSocket | null = null;
-    private connecting: Promise<void> | null = null;
+    private connecting: Promise<RunnerSocket> | null = null;
     private readonly listeners = new Set<(data: string) => void>();
     private readonly _id = `pty-${Math.random().toString(36).slice(2, 10)}`;
 
     constructor(
         private readonly client: RunnerClient,
         private readonly sandboxId: string,
+        private readonly onDispose?: () => void,
     ) {
         super();
     }
@@ -150,13 +151,13 @@ export class DockerTerminal extends ProviderTerminal {
                 .connect()
                 .then(() => {
                     this.socket = socket;
+                    return socket;
                 })
                 .finally(() => {
                     this.connecting = null;
                 });
         }
-        await this.connecting;
-        return this.socket as unknown as RunnerSocket;
+        return this.connecting;
     }
 
     async open(dimensions?: ProviderTerminalShellSize): Promise<string> {
@@ -195,13 +196,19 @@ export class DockerTerminal extends ProviderTerminal {
         this.socket?.close();
         this.socket = null;
         this.listeners.clear();
+        this.onDispose?.();
     }
 }
 
 export class DockerTask extends ProviderTask {
     private readonly stream: DevTaskStream;
 
-    constructor(client: RunnerClient, sandboxId: string, taskId: string) {
+    constructor(
+        client: RunnerClient,
+        sandboxId: string,
+        taskId: string,
+        private readonly onDispose?: () => void,
+    ) {
         super();
         this.stream = new DevTaskStream(client, sandboxId, taskId);
     }
@@ -240,6 +247,7 @@ export class DockerTask extends ProviderTask {
 
     dispose(): void {
         this.stream.dispose();
+        this.onDispose?.();
     }
 }
 
@@ -282,6 +290,7 @@ export class DockerBackgroundCommand extends ProviderBackgroundCommand {
         client: RunnerClient,
         sandboxId: string,
         private readonly _command: string,
+        private readonly onDispose?: () => void,
     ) {
         super();
         this.stream = new BackgroundStream(client, sandboxId, _command);
@@ -305,8 +314,10 @@ export class DockerBackgroundCommand extends ProviderBackgroundCommand {
         await this.stream.open();
     }
 
-    kill(): Promise<void> {
-        return this.stream.kill();
+    async kill(): Promise<void> {
+        await this.stream.kill();
+        // A killed command no longer needs provider-level cleanup tracking.
+        this.onDispose?.();
     }
 
     onOutput(callback: (data: string) => void): () => void {
@@ -315,6 +326,7 @@ export class DockerBackgroundCommand extends ProviderBackgroundCommand {
 
     dispose(): void {
         this.stream.dispose();
+        this.onDispose?.();
     }
 }
 

@@ -1,7 +1,7 @@
 import { createEnv } from '@t3-oss/env-nextjs';
 import { z } from 'zod';
 
-export const env = createEnv({
+const baseEnv = createEnv({
     /**
      * Specify your server-side environment variables schema here. This way you can ensure the app
      * isn't built with invalid env vars.
@@ -183,3 +183,31 @@ export const env = createEnv({
      */
     emptyStringAsUndefined: true,
 });
+
+/**
+ * The sandbox backend decides which credentials are mandatory. t3-env has no conditional schema,
+ * so validate it here (server only; skipped with SKIP_ENV_VALIDATION).
+ */
+function assertSandboxBackendEnv() {
+    if (process.env.SKIP_ENV_VALIDATION || typeof window !== 'undefined') return;
+    const required =
+        baseEnv.NEXT_PUBLIC_CODE_PROVIDER === 'docker'
+            ? ([
+                  'RUNNER_SECRET',
+                  'RUNNER_INTERNAL_URL',
+                  'NEXT_PUBLIC_RUNNER_URL',
+                  'NEXT_PUBLIC_SANDBOX_PREVIEW_HOST',
+              ] as const)
+            : (['CSB_API_KEY'] as const);
+    const missing = required.filter((key) => !baseEnv[key as keyof typeof baseEnv]);
+    if (missing.length > 0) {
+        const backend = baseEnv.NEXT_PUBLIC_CODE_PROVIDER === 'docker' ? 'docker' : 'code_sandbox';
+        throw new Error(
+            `Invalid environment variables for NEXT_PUBLIC_CODE_PROVIDER=${backend}: missing ${missing.join(', ')}`,
+        );
+    }
+}
+
+assertSandboxBackendEnv();
+
+export const env = baseEnv;

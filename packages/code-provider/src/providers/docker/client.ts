@@ -61,15 +61,57 @@ export function base64ToBytes(b64: string): Uint8Array {
     return bytes;
 }
 
+function normalizeBaseUrl(baseUrl: string): string {
+    return baseUrl.replace(/\/+$/, '');
+}
+
 export class RunnerClient {
-    readonly baseUrl: string;
+    private _baseUrl: string;
     private token: string | undefined;
     private readonly refreshToken?: () => Promise<string | undefined>;
+    /** Shared by concurrent callers so a burst of 401s triggers one refresh. */
+    private refreshing: Promise<string | undefined> | null = null;
 
     constructor(options: RunnerClientOptions) {
-        this.baseUrl = options.baseUrl.replace(/\/+$/, '');
+        this._baseUrl = normalizeBaseUrl(options.baseUrl);
         this.token = options.token;
         this.refreshToken = options.refreshToken;
+    }
+
+    get baseUrl(): string {
+        return this._baseUrl;
+    }
+
+    /** Points the client (and every socket/stream built on it) at a different runner URL. */
+    setBaseUrl(baseUrl: string) {
+        this._baseUrl = normalizeBaseUrl(baseUrl);
+    }
+
+    get canRefresh(): boolean {
+        return !!this.refreshToken;
+    }
+
+    /**
+     * Obtains a fresh token and stores it. Concurrent calls share one in-flight request.
+     * Resolves undefined (never rejects) when there is no refresher or it fails.
+     */
+    refresh(): Promise<string | undefined> {
+        const refreshToken = this.refreshToken;
+        if (!refreshToken) return Promise.resolve(undefined);
+        if (!this.refreshing) {
+            this.refreshing = (async () => {
+                try {
+                    const fresh = await refreshToken();
+                    if (fresh) this.token = fresh;
+                    return fresh;
+                } catch {
+                    return undefined;
+                } finally {
+                    this.refreshing = null;
+                }
+            })();
+        }
+        return this.refreshing;
     }
 
     setToken(token: string | undefined) {
@@ -80,22 +122,21 @@ export class RunnerClient {
         return this.token;
     }
 
-    async request<T = unknown>(
-        method: string,
-        path: string,
-        options: RequestOptions = {},
-    ): Promise<T> {
+    /** Authenticated fetch with one single-flight token refresh on 401; throws RunnerError on !ok. */
+    private async fetchOk(method: string, path: string, options: RequestOptions): Promise<Response> {
+        let sentToken: string | undefined;
         const send = () => {
+            sentToken = this.token;
             const headers: Record<string, string> = {};
-            if (this.token) {
-                headers.Authorization = `Bearer ${this.token}`;
+            if (sentToken) {
+                headers.Authorization = `Bearer ${sentToken}`;
             }
             let body: string | undefined;
             if (options.body !== undefined) {
                 headers['Content-Type'] = 'application/json';
                 body = JSON.stringify(options.body);
             }
-            return fetch(`${this.baseUrl}${path}${buildQuery(options.query)}`, {
+            return fetch(`${this._baseUrl}${path}${buildQuery(options.query)}`, {
                 method,
                 headers,
                 body,
@@ -104,9 +145,9 @@ export class RunnerClient {
 
         let res = await send();
         if (res.status === 401 && this.refreshToken) {
-            const fresh = await this.refreshToken();
+            // Another caller may already have refreshed while this request was in flight.
+            const fresh = this.token !== sentToken ? this.token : await this.refresh();
             if (fresh) {
-                this.token = fresh;
                 res = await send();
             }
         }
@@ -123,16 +164,38 @@ export class RunnerClient {
             }
             throw new RunnerError(message, res.status);
         }
+        return res;
+    }
 
+    async request<T = unknown>(
+        method: string,
+        path: string,
+        options: RequestOptions = {},
+    ): Promise<T> {
+        const res = await this.fetchOk(method, path, options);
         if (options.parse === 'text') {
             return (await res.text()) as T;
         }
         const text = await res.text();
-        return (text ? JSON.parse(text) : {}) as T;
+        if (!text) return {} as T;
+        try {
+            return JSON.parse(text) as T;
+        } catch {
+            throw new RunnerError(
+                `Runner returned a non-JSON response: ${method} ${path} (${res.status})`,
+                res.status,
+            );
+        }
+    }
+
+    /** Authenticated binary request (e.g. /fs/download). */
+    async requestBlob(method: string, path: string, options: RequestOptions = {}): Promise<Blob> {
+        const res = await this.fetchOk(method, path, options);
+        return res.blob();
     }
 
     wsUrl(path: string, query?: Record<string, string | number | boolean | undefined>): string {
-        const base = this.baseUrl.replace(/^http/, 'ws');
+        const base = this._baseUrl.replace(/^http/, 'ws');
         const all = { ...query, token: this.token };
         return `${base}${path}${buildQuery(all)}`;
     }
@@ -151,6 +214,8 @@ export class RunnerSocket {
     private ws: WebSocket | null = null;
     private closedByUser = false;
     private reconnects = 0;
+    private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    private readonly giveUpListeners = new Set<() => void>();
     private readonly messageListeners = new Set<(message: RunnerMessage) => void>();
     private readonly closeListeners = new Set<(code: number) => void>();
 
@@ -165,9 +230,17 @@ export class RunnerSocket {
         return this.ws?.readyState === 1;
     }
 
-    connect(): Promise<void> {
+    async connect(): Promise<void> {
         this.closedByUser = false;
-        return this.open(true);
+        try {
+            await this.open(true);
+        } catch (error) {
+            // A rejected handshake (expired token) surfaces as a pre-open close; retry once with a fresh token.
+            if (this.closedByUser || !this.client.canRefresh) throw error;
+            const fresh = await this.client.refresh();
+            if (!fresh) throw error;
+            await this.open(true);
+        }
     }
 
     private open(initial: boolean): Promise<void> {
@@ -214,10 +287,19 @@ export class RunnerSocket {
 
     private scheduleReconnect() {
         const max = this.options.maxReconnects ?? 5;
-        if (this.reconnects >= max) return;
+        if (this.reconnects >= max) {
+            for (const listener of this.giveUpListeners) {
+                listener();
+            }
+            return;
+        }
         this.reconnects++;
         const delay = Math.min(1000 * 2 ** (this.reconnects - 1), 10000);
-        setTimeout(() => {
+        this.reconnectTimer = setTimeout(async () => {
+            this.reconnectTimer = null;
+            if (this.closedByUser) return;
+            // The socket may have died because the token expired: refresh before retrying.
+            await this.client.refresh();
             if (this.closedByUser) return;
             this.open(false).catch(() => this.scheduleReconnect());
         }, delay);
@@ -244,8 +326,20 @@ export class RunnerSocket {
         };
     }
 
+    /** Fires once reconnecting is exhausted; the socket stays closed afterwards. */
+    onGiveUp(callback: () => void): () => void {
+        this.giveUpListeners.add(callback);
+        return () => {
+            this.giveUpListeners.delete(callback);
+        };
+    }
+
     close() {
         this.closedByUser = true;
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
         const ws = this.ws;
         this.ws = null;
         try {

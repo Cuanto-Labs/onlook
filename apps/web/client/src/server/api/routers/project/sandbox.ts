@@ -225,7 +225,8 @@ export const sandboxRouter = createTRPCRouter({
         .mutation(async ({ input, ctx }) => {
             await verifySandboxAccess(ctx.db, ctx.user.id, input.sandboxId);
             if (isDocker(input.sandboxId)) {
-                await DockerProvider.deleteSandbox(input.sandboxId);
+                // Same as CSB: shut the sandbox down but keep its files.
+                await DockerProvider.stopSandbox(input.sandboxId);
                 return;
             }
             const provider = await getProvider({ sandboxId: input.sandboxId });

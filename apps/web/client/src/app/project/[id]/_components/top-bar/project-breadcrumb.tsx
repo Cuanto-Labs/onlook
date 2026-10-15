@@ -71,7 +71,18 @@ export const ProjectBreadcrumb = observer(() => {
             const result = await editorEngine.activeSandbox.downloadFiles(project.name);
 
             if (result) {
-                window.open(result.downloadUrl, '_blank');
+                if (result.downloadUrl.startsWith('blob:')) {
+                    // Self-hosted runner: an object URL needs an anchor to get a file name.
+                    const anchor = document.createElement('a');
+                    anchor.href = result.downloadUrl;
+                    anchor.download = result.fileName;
+                    document.body.appendChild(anchor);
+                    anchor.click();
+                    anchor.remove();
+                    setTimeout(() => URL.revokeObjectURL(result.downloadUrl), 60_000);
+                } else {
+                    window.open(result.downloadUrl, '_blank');
+                }
 
                 posthog.capture('download_project_code', {
                     projectId: project.id,

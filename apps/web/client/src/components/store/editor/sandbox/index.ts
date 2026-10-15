@@ -205,7 +205,8 @@ export class SandboxManager {
                 // in case there is no URL provided then the code must be updated
                 // to handle this case
                 downloadUrl: url ?? '',
-                fileName: `${projectName ?? 'onlook-project'}-${Date.now()}.zip`,
+                // The self-hosted runner returns a tar.gz as a blob URL; CSB returns a zip.
+                fileName: `${projectName ?? 'onlook-project'}-${Date.now()}.${url?.startsWith('blob:') ? 'tar.gz' : 'zip'}`,
             };
         } catch (error) {
             console.error('Error generating download URL:', error);

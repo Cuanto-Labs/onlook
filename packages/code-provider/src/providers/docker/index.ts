@@ -85,13 +85,27 @@ export interface DockerProviderOptions {
     /** Browser path: fetches a per-sandbox token from the onlook-web server. */
     getSession?: (sandboxId: string, userId?: string) => Promise<DockerSession>;
     token?: string;
+    /** Ping the runner periodically so the idle reaper keeps the sandbox up. Default true. */
+    keepActiveWhileConnected?: boolean;
+}
+
+/** Thrown by runCommand when the command exits non-zero; `output` carries merged stdout+stderr. */
+export class RunnerCommandError extends Error {
+    constructor(
+        message: string,
+        public readonly exitCode: number,
+        public readonly output: string,
+    ) {
+        super(message);
+        this.name = 'RunnerCommandError';
+    }
 }
 
 export interface DockerCreateSessionOutput extends CreateSessionOutput, DockerSession {}
 
 export class DockerProvider extends Provider {
     private readonly options: DockerProviderOptions;
-    private client: RunnerClient;
+    private readonly client: RunnerClient;
     private keepalive: ReturnType<typeof setInterval> | null = null;
     private readonly watchers = new Set<DockerFileWatcher>();
     private readonly terminals = new Set<DockerTerminal>();
@@ -131,8 +145,9 @@ export class DockerProvider extends Provider {
         if (this.options.getSession) {
             const session = await this.options.getSession(this.sandboxId, this.options.userId);
             if (session.runnerUrl && session.runnerUrl !== this.options.runnerUrl) {
+                // Update in place so existing sockets, watchers and tasks follow the new URL.
                 this.options.runnerUrl = session.runnerUrl;
-                this.client = this.newClient(session.runnerUrl);
+                this.client.setBaseUrl(session.runnerUrl);
             }
             return session.token;
         }
@@ -154,7 +169,9 @@ export class DockerProvider extends Provider {
             this.client.setToken(token);
         }
         await this.client.request('POST', this.route('/start'));
-        this.startKeepalive();
+        if (this.options.keepActiveWhileConnected !== false) {
+            this.startKeepalive();
+        }
         return {};
     }
 
@@ -188,7 +205,7 @@ export class DockerProvider extends Provider {
 
     async ping(): Promise<boolean> {
         try {
-            await this.client.request('GET', '/health', { parse: 'text' });
+            await this.client.request('POST', this.route('/ping'));
             return true;
         } catch (error) {
             console.error('Failed to ping sandbox', error);
@@ -354,9 +371,16 @@ export class DockerProvider extends Provider {
         };
     }
 
-    async downloadFiles(input: DownloadFilesInput): Promise<DownloadFilesOutput> {
-        // The runner authenticates downloads with a Bearer header, which a plain URL cannot carry.
-        return { url: undefined };
+    async downloadFiles({ args }: DownloadFilesInput): Promise<DownloadFilesOutput> {
+        // The runner authenticates downloads with a Bearer header, which a plain URL cannot carry,
+        // so fetch the tar.gz here and hand the browser an object URL.
+        const blob = await this.client.requestBlob('GET', this.route('/fs/download'), {
+            query: { path: args.path },
+        });
+        if (typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
+            return { url: undefined };
+        }
+        return { url: URL.createObjectURL(blob) };
     }
 
     async copyFiles({ args }: CopyFilesInput): Promise<CopyFileOutput> {
@@ -377,7 +401,9 @@ export class DockerProvider extends Provider {
     }
 
     async watchFiles(input: WatchFilesInput): Promise<WatchFilesOutput> {
-        const watcher = new DockerFileWatcher(this.client, this.sandboxId);
+        const watcher: DockerFileWatcher = new DockerFileWatcher(this.client, this.sandboxId, () => {
+            this.watchers.delete(watcher);
+        });
         await watcher.start(input);
         this.watchers.add(watcher);
 
@@ -394,7 +420,9 @@ export class DockerProvider extends Provider {
     // ---- terminals, tasks, commands ----
 
     async createTerminal(input: CreateTerminalInput): Promise<CreateTerminalOutput> {
-        const terminal = new DockerTerminal(this.client, this.sandboxId);
+        const terminal = new DockerTerminal(this.client, this.sandboxId, () => {
+            this.terminals.delete(terminal);
+        });
         this.terminals.add(terminal);
         return { terminal };
     }
@@ -405,8 +433,11 @@ export class DockerProvider extends Provider {
         }
         let task = this.tasks.get(args.id);
         if (!task) {
-            task = new DockerTask(this.client, this.sandboxId, args.id);
-            this.tasks.set(args.id, task);
+            const taskId = args.id;
+            task = new DockerTask(this.client, this.sandboxId, taskId, () => {
+                this.tasks.delete(taskId);
+            });
+            this.tasks.set(taskId, task);
         }
         return { task };
     }
@@ -417,13 +448,29 @@ export class DockerProvider extends Provider {
             this.route('/exec'),
             { body: { command: args.command } },
         );
+        // Match CodeSandbox, whose commands.run rejects on a non-zero exit with the output attached.
+        if (typeof res.exitCode === 'number' && res.exitCode !== 0) {
+            const output = res.output ?? '';
+            throw new RunnerCommandError(
+                output.trim() || `Command exited with code ${res.exitCode}`,
+                res.exitCode,
+                output,
+            );
+        }
         return { output: res.output };
     }
 
     async runBackgroundCommand({
         args,
     }: TerminalBackgroundCommandInput): Promise<TerminalBackgroundCommandOutput> {
-        const command = new DockerBackgroundCommand(this.client, this.sandboxId, args.command);
+        const command: DockerBackgroundCommand = new DockerBackgroundCommand(
+            this.client,
+            this.sandboxId,
+            args.command,
+            () => {
+                this.commands.delete(command);
+            },
+        );
         this.commands.add(command);
         return { command };
     }

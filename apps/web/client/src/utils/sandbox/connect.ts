@@ -38,12 +38,16 @@ export async function connectSandboxProvider({
     keepActiveWhileConnected,
 }: ConnectSandboxInput): Promise<Provider> {
     if (providerForSandboxId(sandboxId) === CodeProvider.Docker) {
+        if (!env.NEXT_PUBLIC_RUNNER_URL) {
+            throw new Error('NEXT_PUBLIC_RUNNER_URL is not set; cannot reach the sandbox runner');
+        }
         return createCodeProviderClient(CodeProvider.Docker, {
             providerOptions: {
                 docker: {
                     sandboxId,
                     userId,
-                    runnerUrl: env.NEXT_PUBLIC_RUNNER_URL ?? '',
+                    runnerUrl: env.NEXT_PUBLIC_RUNNER_URL,
+                    keepActiveWhileConnected,
                     getSession: async (id) => {
                         const session = await startSession(id);
                         if (!isRunnerSession(session)) {

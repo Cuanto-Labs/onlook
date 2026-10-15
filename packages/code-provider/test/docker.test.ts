@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { createHmac } from 'node:crypto';
 
 import { CodeProvider, defaultCodeProvider, providerForSandboxId } from '../src';
-import { DockerProvider, isDockerSandboxId } from '../src/providers/docker';
+import { DockerProvider, RunnerCommandError, isDockerSandboxId } from '../src/providers/docker';
 import { signRunnerToken } from '../src/providers/docker/token';
 
 const SANDBOX_ID = 'dk4901-a8k2pq';
@@ -179,18 +179,64 @@ describe('DockerProvider file operations', () => {
         expect(res.changedFiles).toEqual(['a.ts']);
     });
 
-    test('downloadFiles returns no url', async () => {
-        expect(await newProvider().downloadFiles({ args: { path: '.' } })).toEqual({
-            url: undefined,
-        });
+    test('runCommand throws with the output on a non-zero exit', async () => {
+        responder = () => ({ body: { output: 'boom: not found\n', exitCode: 127 } });
+        const error = await newProvider()
+            .runCommand({ args: { command: 'nope' } })
+            .catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(RunnerCommandError);
+        expect((error as RunnerCommandError).exitCode).toBe(127);
+        expect((error as RunnerCommandError).output).toBe('boom: not found\n');
+        expect((error as Error).message).toBe('boom: not found');
     });
 
-    test('ping hits unauthenticated /health', async () => {
-        responder = () => ({ text: 'ok' });
+    test('runCommand error message falls back to the exit code when output is empty', async () => {
+        responder = () => ({ body: { output: '', exitCode: 1 } });
+        await expect(newProvider().runCommand({ args: { command: 'false' } })).rejects.toThrow(
+            'Command exited with code 1',
+        );
+    });
+
+    test('downloadFiles fetches /fs/download with Bearer and returns an object URL', async () => {
+        const realFetchImpl = globalThis.fetch;
+        let auth: string | undefined;
+        let requested: URL | undefined;
+        globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+            requested = new URL(String(input));
+            auth = (init?.headers as Record<string, string>).Authorization;
+            return new Response(new Uint8Array([31, 139, 8]), { status: 200 });
+        }) as typeof fetch;
+        const savedCreate = URL.createObjectURL;
+        let blobSize = -1;
+        URL.createObjectURL = ((blob: Blob) => {
+            blobSize = blob.size;
+            return 'blob:test-1';
+        }) as typeof URL.createObjectURL;
+        try {
+            const res = await newProvider().downloadFiles({ args: { path: '.' } });
+            expect(res).toEqual({ url: 'blob:test-1' });
+            expect(blobSize).toBe(3);
+            expect(requested!.pathname).toBe(`${ROUTE}/fs/download`);
+            expect(requested!.searchParams.get('path')).toBe('.');
+            expect(auth).toBe('Bearer tok');
+        } finally {
+            URL.createObjectURL = savedCreate;
+            globalThis.fetch = realFetchImpl;
+        }
+    });
+
+    test('ping hits the authenticated per-sandbox route', async () => {
         expect(await newProvider().ping()).toBe(true);
-        expect(calls[0]!.url.pathname).toBe('/health');
+        expect(calls[0]!.method).toBe('POST');
+        expect(calls[0]!.url.pathname).toBe(`${ROUTE}/ping`);
+        expect(calls[0]!.headers.Authorization).toBe('Bearer tok');
         responder = () => ({ status: 500, body: { error: 'down' } });
         expect(await newProvider().ping()).toBe(false);
+    });
+
+    test('a non-JSON 2xx response raises a RunnerError instead of a SyntaxError', async () => {
+        responder = () => ({ text: '<html>proxy</html>' });
+        await expect(newProvider().gitStatus({})).rejects.toThrow('non-JSON');
     });
 });
 
@@ -233,6 +279,41 @@ describe('DockerProvider lifecycle', () => {
                 : { status: 401, body: { error: 'unauthorized' } };
         await provider.gitStatus({});
         expect(calls.map((c) => c.headers.Authorization)).toEqual(['Bearer old', 'Bearer new1']);
+    });
+
+    test('concurrent 401s share a single token refresh', async () => {
+        let issued = 0;
+        const provider = new DockerProvider({
+            sandboxId: SANDBOX_ID,
+            runnerUrl: BASE,
+            token: 'old',
+            getSession: async () => {
+                await new Promise((resolve) => setTimeout(resolve, 10));
+                return { token: `new${++issued}` };
+            },
+        });
+        responder = (call) =>
+            call.headers.Authorization === 'Bearer new1'
+                ? { body: { changedFiles: [] } }
+                : { status: 401, body: { error: 'unauthorized' } };
+        await Promise.all([provider.gitStatus({}), provider.gitStatus({}), provider.gitStatus({})]);
+        expect(issued).toBe(1);
+        expect(calls.filter((c) => c.headers.Authorization === 'Bearer new1')).toHaveLength(3);
+    });
+
+    test('a new runnerUrl from getSession updates the existing client in place', async () => {
+        const provider = new DockerProvider({
+            sandboxId: SANDBOX_ID,
+            runnerUrl: BASE,
+            token: 'old',
+            getSession: async () => ({ token: 'new', runnerUrl: 'http://other.test' }),
+        });
+        responder = (call) =>
+            call.url.host === 'other.test'
+                ? { body: { changedFiles: [] } }
+                : { status: 401, body: { error: 'unauthorized' } };
+        await provider.gitStatus({});
+        expect(calls.map((c) => c.url.host)).toEqual(['runner.test', 'other.test']);
     });
 
     test('createProjectFromGit is unavailable', async () => {
@@ -387,6 +468,39 @@ describe('DockerProvider sockets', () => {
             data: JSON.stringify({ type: 'change', paths: ['src/a.ts'] }),
         });
         expect(events).toEqual([{ type: 'change', paths: ['src/a.ts'] }]);
+        await watcher.stop();
+    });
+
+    test('watch frames with several paths emit one event per path (never a fake rename)', async () => {
+        const events: Array<{ type: string; paths: string[] }> = [];
+        const { watcher } = await newProvider().watchFiles({
+            args: { path: '.', recursive: true },
+            onFileChange: async (event) => {
+                events.push(event);
+            },
+        });
+        sockets[0]!.emit('message', {
+            data: JSON.stringify({ type: 'change', paths: ['a.ts', 'b.ts'] }),
+        });
+        sockets[0]!.emit('message', {
+            data: JSON.stringify({ type: 'remove', paths: ['c.ts', 'd.ts', 'e.ts'] }),
+        });
+        expect(events).toEqual([
+            { type: 'change', paths: ['a.ts'] },
+            { type: 'change', paths: ['b.ts'] },
+            { type: 'remove', paths: ['c.ts'] },
+            { type: 'remove', paths: ['d.ts'] },
+            { type: 'remove', paths: ['e.ts'] },
+        ]);
+        await watcher.stop();
+    });
+
+    test('starting a watcher twice closes the previous socket', async () => {
+        const { watcher } = await newProvider().watchFiles({ args: { path: '.' } });
+        await watcher.start({ args: { path: '.' } });
+        expect(sockets).toHaveLength(2);
+        expect(sockets[0]!.readyState).toBe(3);
+        expect(sockets[1]!.readyState).toBe(1);
         await watcher.stop();
     });
 
